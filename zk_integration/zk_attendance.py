@@ -1,0 +1,80 @@
+import frappe
+from werkzeug.wrappers import Response
+
+logger = frappe.logger("zk_integration", allow_site=True, file_count=10)
+
+
+class ADMSRenderer:
+	"""Handles ZKTeco ADMS protocol requests under /iclock/*."""
+
+	def __init__(self, path, status_code=None):
+		self.path = path
+		self.status_code = 200
+
+	def can_render(self):
+		return "iclock/" in self.path.lower()
+
+	def render(self):
+		args = frappe.local.form_dict
+		sn = args.get("SN")
+
+		if not self._is_known_device(sn):
+			logger.warning(f"Rejected push from unknown/disabled SN={sn}")
+			return Response("", mimetype="text/plain", status=403)
+
+		self._touch_last_seen(sn)
+
+		if "getrequest" in self.path.lower():
+			return Response("OK", mimetype="text/plain")
+
+		table = args.get("table")
+		if table == "ATTLOG":
+			raw = frappe.request.get_data(as_text=True).strip()
+			self.handle_attlog(sn, raw)
+
+		return Response("OK", mimetype="text/plain")
+
+	def _is_known_device(self, sn):
+		if not sn:
+			return False
+		return frappe.db.exists("Biometric Device", {"serial_number": sn, "enabled": 1})
+
+	def _touch_last_seen(self, sn):
+		frappe.db.set_value("Biometric Device", {"serial_number": sn}, "last_seen", frappe.utils.now())
+		frappe.db.commit()
+
+	def handle_attlog(self, sn, raw):
+		for line in raw.splitlines():
+			self._process_line(sn, line)
+
+	def _process_line(self, sn, line):
+		parts = line.split()
+		if len(parts) < 3:
+			logger.warning(f"Malformed ATTLOG line from SN={sn}: {line!r}")
+			return
+
+		pin, date, time = parts[0], parts[1], parts[2]
+		timestamp = f"{date} {time}"
+
+		employee = frappe.db.get_value("Employee", {"attendance_device_id": pin}, "name")
+		if not employee:
+			logger.warning(f"No Employee for device pin={pin} (SN={sn})")
+			return
+
+		try:
+			frappe.get_attr(
+				"hrms.hr.doctype.employee_checkin.employee_checkin.add_log_based_on_employee_field"
+			)(
+				employee_field_value=pin,
+				timestamp=timestamp,
+				device_id=sn,
+				log_type=None,
+				employee_fieldname="attendance_device_id",
+			)
+			frappe.db.commit()
+		except frappe.DuplicateEntryError:
+			frappe.db.rollback()
+			logger.info(f"Duplicate checkin ignored: pin={pin} time={timestamp}")
+		except Exception:
+			frappe.db.rollback()
+			logger.error(f"Failed to record checkin pin={pin} time={timestamp}\n{frappe.get_traceback()}")
