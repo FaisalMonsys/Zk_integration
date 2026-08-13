@@ -69,7 +69,9 @@ class ADMSRenderer:
 			return
 
 		try:
-			with frappe.as_site_admin():
+			current_user = frappe.session.user
+			frappe.set_user("Administrator")
+			try:
 				frappe.get_attr(
 					"hrms.hr.doctype.employee_checkin.employee_checkin.add_log_based_on_employee_field"
 				)(
@@ -80,6 +82,8 @@ class ADMSRenderer:
 					employee_fieldname="attendance_device_id",
 				)
 				frappe.db.commit()
+			finally:
+				frappe.set_user(current_user)
 		except frappe.DuplicateEntryError:
 			frappe.db.rollback()
 			logger.info(f"Duplicate checkin ignored: pin={pin} time={timestamp}")
