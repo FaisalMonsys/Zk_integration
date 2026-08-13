@@ -1,5 +1,6 @@
 import frappe
 from werkzeug.wrappers import Response
+from datetime import datetime
 
 logger = frappe.logger("zk_integration", allow_site=True, file_count=10)
 
@@ -9,7 +10,7 @@ class ADMSRenderer:
 
 	def __init__(self, path, status_code=None):
 		self.path = path
-		self.status_code = 200
+		self.status_code = status_code or 200
 
 	def can_render(self):
 		return "iclock/" in self.path.lower()
@@ -56,22 +57,29 @@ class ADMSRenderer:
 		pin, date, time = parts[0], parts[1], parts[2]
 		timestamp = f"{date} {time}"
 
+		try:
+			frappe.utils.get_datetime(timestamp)
+		except (ValueError, TypeError):
+			logger.warning(f"Invalid datetime format from SN={sn}: {timestamp!r}")
+			return
+
 		employee = frappe.db.get_value("Employee", {"attendance_device_id": pin}, "name")
 		if not employee:
 			logger.warning(f"No Employee for device pin={pin} (SN={sn})")
 			return
 
 		try:
-			frappe.get_attr(
-				"hrms.hr.doctype.employee_checkin.employee_checkin.add_log_based_on_employee_field"
-			)(
-				employee_field_value=pin,
-				timestamp=timestamp,
-				device_id=sn,
-				log_type=None,
-				employee_fieldname="attendance_device_id",
-			)
-			frappe.db.commit()
+			with frappe.as_site_admin():
+				frappe.get_attr(
+					"hrms.hr.doctype.employee_checkin.employee_checkin.add_log_based_on_employee_field"
+				)(
+					employee_field_value=pin,
+					timestamp=timestamp,
+					device_id=sn,
+					log_type=None,
+					employee_fieldname="attendance_device_id",
+				)
+				frappe.db.commit()
 		except frappe.DuplicateEntryError:
 			frappe.db.rollback()
 			logger.info(f"Duplicate checkin ignored: pin={pin} time={timestamp}")
