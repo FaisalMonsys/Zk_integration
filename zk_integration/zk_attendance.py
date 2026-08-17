@@ -8,6 +8,8 @@ logger = frappe.logger("zk_integration", allow_site=True, file_count=10)
 class ADMSRenderer:
 	"""Handles ZKTeco ADMS protocol requests under /iclock/*."""
 
+	DEBOUNCE_SECONDS = 30
+
 	def __init__(self, path, status_code=None):
 		self.path = path
 		self.status_code = status_code or 200
@@ -63,30 +65,48 @@ class ADMSRenderer:
 			logger.warning(f"Invalid datetime format from SN={sn}: {timestamp!r}")
 			return
 
-		employee = frappe.db.get_value("Employee", {"attendance_device_id": pin}, "name")
+		employee = frappe.db.get_value(
+			"Employee", {"attendance_device_id": pin},
+			["name", "employee_name", "user_id"], as_dict=True,
+		)
 		if not employee:
 			logger.warning(f"No Employee for device pin={pin} (SN={sn})")
 			return
 
+		if self._is_bounce(employee['name'], timestamp):
+			logger.info(f"Bounce punch ignored (within {self.DEBOUNCE_SECONDS}s): employee={employee['name']} time={timestamp}")
+			return
+
+		log_type = self._next_log_type(employee['name'])
+
 		try:
-			current_user = frappe.session.user
-			frappe.set_user("Administrator")
-			try:
-				frappe.get_attr(
-					"hrms.hr.doctype.employee_checkin.employee_checkin.add_log_based_on_employee_field"
-				)(
-					employee_field_value=pin,
-					timestamp=timestamp,
-					device_id=sn,
-					log_type=None,
-					employee_fieldname="attendance_device_id",
-				)
-				frappe.db.commit()
-			finally:
-				frappe.set_user(current_user)
+			doc = frappe.new_doc("Employee Checkin")
+			doc.employee = employee['name']
+			doc.employee_name = employee['employee_name']
+			doc.time = timestamp
+			doc.device_id = sn
+			doc.log_type = log_type
+			doc.owner = employee.get('user_id') or "Administrator"
+			doc.insert(ignore_permissions=True)
+			frappe.db.commit()
 		except frappe.DuplicateEntryError:
 			frappe.db.rollback()
 			logger.info(f"Duplicate checkin ignored: pin={pin} time={timestamp}")
 		except Exception:
 			frappe.db.rollback()
 			logger.error(f"Failed to record checkin pin={pin} time={timestamp}\n{frappe.get_traceback()}")
+
+	def _is_bounce(self, employee, timestamp):
+		last_time = frappe.db.get_value(
+			"Employee Checkin", {"employee": employee}, "time", order_by="time desc"
+		)
+		if not last_time:
+			return False
+		delta = abs((frappe.utils.get_datetime(timestamp) - frappe.utils.get_datetime(last_time)).total_seconds())
+		return delta < self.DEBOUNCE_SECONDS
+
+	def _next_log_type(self, employee):
+		last_log_type = frappe.db.get_value(
+			"Employee Checkin", {"employee": employee}, "log_type", order_by="time desc"
+		)
+		return "OUT" if last_log_type == "IN" else "IN"
