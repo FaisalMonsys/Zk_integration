@@ -86,8 +86,12 @@ class ADMSRenderer:
 			doc.time = timestamp
 			doc.device_id = sn
 			doc.log_type = log_type
-			doc.owner = employee.get('user_id') or "Administrator"
 			doc.insert(ignore_permissions=True)
+			owner_user = employee.get('user_id') or ""
+			frappe.db.sql(
+				"UPDATE `tabEmployee Checkin` SET owner=%s, modified_by=%s WHERE name=%s",
+				(owner_user, owner_user, doc.name)
+			)
 			frappe.db.commit()
 		except frappe.DuplicateEntryError:
 			frappe.db.rollback()
