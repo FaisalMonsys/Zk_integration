@@ -77,15 +77,12 @@ class ADMSRenderer:
 			logger.info(f"Bounce punch ignored (within {self.DEBOUNCE_SECONDS}s): employee={employee['name']} time={timestamp}")
 			return
 
-		log_type = self._next_log_type(employee['name'])
-
 		try:
 			doc = frappe.new_doc("Employee Checkin")
 			doc.employee = employee['name']
 			doc.employee_name = employee['employee_name']
 			doc.time = timestamp
 			doc.device_id = sn
-			doc.log_type = log_type
 			doc.insert(ignore_permissions=True)
 			owner_user = employee.get('user_id') or ""
 			frappe.db.sql(
@@ -108,9 +105,3 @@ class ADMSRenderer:
 			return False
 		delta = abs((frappe.utils.get_datetime(timestamp) - frappe.utils.get_datetime(last_time)).total_seconds())
 		return delta < self.DEBOUNCE_SECONDS
-
-	def _next_log_type(self, employee):
-		last_log_type = frappe.db.get_value(
-			"Employee Checkin", {"employee": employee}, "log_type", order_by="time desc"
-		)
-		return "OUT" if last_log_type == "IN" else "IN"
